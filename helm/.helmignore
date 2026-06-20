@@ -1,0 +1,5 @@
+# .helmignore — files to exclude from the packaged chart
+.git/
+*.tgz
+Chart.lock
+README.md

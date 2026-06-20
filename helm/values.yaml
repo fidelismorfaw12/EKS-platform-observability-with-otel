@@ -1,0 +1,349 @@
+# =========================================================================== #
+#  Observability Stack — Umbrella Values                                      #
+# --------------------------------------------------------------------------- #
+#  This file holds DEFAULT values. Override per-environment with              #
+#  values-dev.yaml / values-prod.yaml or `helm upgrade --set`.                #
+# =========================================================================== #
+
+global:
+  clusterName: obs-stack-cluster
+  environment: dev
+  region: us-east-1
+  awsAccountId: "000000000000"
+
+# --------------------------------------------------------------------------- #
+# Common node selector + tolerations applied to every observability pod.       #
+# These target the dedicated observability node group created by terraform.    #
+# --------------------------------------------------------------------------- #
+observabilityNodeSelector: &obsNodeSelector
+  workload: observability
+
+observabilityTolerations: &obsTolerations
+  - key: observability
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+
+# =========================================================================== #
+#  kube-prometheus-stack                                                       #
+# =========================================================================== #
+kubePrometheusStack:
+  enabled: true
+
+  # ---- Prometheus --------------------------------------------------------- #
+  prometheus:
+    prometheusSpec:
+      retention: 15d
+      retentionSize: 50GB
+      replicas: 1                # bump to 2 in prod with thanos-shard
+      enableFeatures:
+        - memory-snapshot-on-shutdown
+        - new-service-discovery-manager
+
+      serviceAccountName: prometheus
+      serviceAccount:
+        annotations:
+          eks.amazonaws.com/role-arn: ""   # injected by terraform values
+
+      # Where to schedule
+      nodeSelector: *obsNodeSelector
+      tolerations: *obsTolerations
+
+      # Storage
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: gp3
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 100Gi
+
+      # Scrape everything that has the standard annotations/labels
+      podMonitorSelectorNilUsesHelmValues: false
+      serviceMonitorSelectorNilUsesHelmValues: false
+      ruleSelectorNilUsesHelmValues: false
+      probeSelectorNilUsesHelmValues: false
+
+      # Additional scrape configs for things without ServiceMonitors
+      additionalScrapeConfigs: []
+
+  # ---- Alertmanager ------------------------------------------------------- #
+  alertmanager:
+    enabled: true
+    config:
+      global:
+        resolve_timeout: 5m
+      route:
+        group_by: ["alertname", "job", "severity"]
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 4h
+        receiver: default
+        routes:
+          - matchers: ["severity=critical"]
+            receiver: critical-slack
+          - matchers: ["severity=warning"]
+            receiver: warning-slack
+      receivers:
+        - name: default
+        - name: critical-slack
+          slack_configs:
+            - api_url: "https://hooks.slack.com/services/REPLACE_ME"
+              channel: "#alerts-critical"
+              send_resolved: true
+        - name: warning-slack
+          slack_configs:
+            - api_url: "https://hooks.slack.com/services/REPLACE_ME"
+              channel: "#alerts-warning"
+              send_resolved: true
+
+    alertmanagerSpec:
+      nodeSelector: *obsNodeSelector
+      tolerations: *obsTolerations
+      storage:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: gp3
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 5Gi
+
+  # ---- Grafana ------------------------------------------------------------ #
+  grafana:
+    enabled: true
+    adminPassword: "admin-change-me"
+
+    nodeSelector: *obsNodeSelector
+    tolerations: *obsTolerations
+
+    persistence:
+      enabled: true
+      storageClassName: gp3
+      size: 10Gi
+
+    service:
+      type: ClusterIP
+
+    # Pre-wire datasources so dashboards work out-of-the-box
+    datasources:
+      datasources.yaml:
+        apiVersion: 1
+        datasources:
+          - name: Prometheus
+            type: prometheus
+            access: proxy
+            url: http://observability-stack-kube-prometheus-prometheus.observability:9090
+            isDefault: true
+          - name: Loki
+            type: loki
+            access: proxy
+            url: http://observability-stack-loki.observability:3100
+            jsonData:
+              maxLines: 1000
+          - name: Jaeger
+            type: jaeger
+            access: proxy
+            url: http://observability-stack-jaeger-query.observability:16686
+
+    # Dashboards shipped as ConfigMaps by the umbrella chart's templates/
+    dashboardProviders:
+      dashboardproviders.yaml:
+        apiVersion: 1
+        providers:
+          - name: default
+            folder: ""
+            type: file
+            disableDeletion: false
+            editable: true
+            options:
+              path: /var/lib/grafana/dashboards/default
+
+  # ---- kube-state-metrics ------------------------------------------------- #
+  kubeStateMetrics:
+    enabled: true
+
+  # ---- node-exporter ------------------------------------------------------ #
+  nodeExporter:
+    enabled: true
+
+# =========================================================================== #
+#  Loki (single binary mode for dev; switch to distributed for prod)          #
+# =========================================================================== #
+loki:
+  enabled: true
+
+  serviceAccount:
+    create: true
+    name: loki
+    annotations:
+      eks.amazonaws.com/role-arn: ""   # injected by terraform values
+
+  singleBinary:
+    replicas: 1
+    nodeSelector: *obsNodeSelector
+    tolerations: *obsTolerations
+    persistence:
+      enabled: true
+      storageClassName: gp3
+      size: 50Gi
+
+  # Ship chunks + index to S3 (cheaper + durable)
+  loki:
+    storage_config:
+      aws:
+        bucketnames: ""               # injected
+        endpoint: ""                  # injected
+        region: ""                    # injected
+        sse_encryption: true
+    common:
+      storage:
+        filesystem: false
+        s3:
+          bucketnames: ""
+          endpoint: ""
+          region: ""
+
+    limits_config:
+      retention_period: 720h          # 30d
+      max_query_length: 721h
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+
+    compactor:
+      working_directory: /var/loki/compactor
+      retention_enabled: true
+      retention_delete_delay: 2h
+      retention_delete_worker_count: 50
+
+  test:
+    enabled: false
+
+# =========================================================================== #
+#  Promtail (DaemonSet — tails /var/log on every node)                        #
+# =========================================================================== #
+promtail:
+  enabled: true
+
+  serviceAccount:
+    create: true
+
+  # Run on EVERY node — that's the point of a DaemonSet
+  nodeSelector: {}
+  tolerations:
+    - operator: Exists
+
+  config:
+    clients:
+      - url: http://observability-stack-loki.observability:3100/loki/api/v1/push
+        tenant_id: default
+
+    positions:
+      filename: /run/promtail/positions.yaml
+
+    snippets:
+      pipelineStages:
+        - docker: {}
+
+      common:
+        - action: replace
+          source_labels: [__meta_kubernetes_namespace]
+          target_label: namespace
+        - action: replace
+          source_labels: [__meta_kubernetes_pod_name]
+          target_label: pod
+        - action: replace
+          source_labels: [__meta_kubernetes_pod_container_name]
+          target_label: container
+        - action: replace
+          replacement: $1
+          separator: /
+          source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_pod_name]
+          target_label: job
+
+# =========================================================================== #
+#  Jaeger (storage = S3 via IRSA)                                             #
+# =========================================================================== #
+jaeger:
+  enabled: true
+
+  serviceAccount:
+    create: true
+    name: jaeger
+    annotations:
+      eks.amazonaws.com/role-arn: ""   # injected
+
+  provisionDataStore:
+    cassandra: false
+
+  storage:
+    type: s3
+    s3:
+      bucket: ""                       # injected
+      region: ""                       # injected
+
+  # Use the all-in-one image for dev; switch to production template for prod
+  allInOne:
+    enabled: true
+    image:
+      repository: jaegertracing/all-in-one
+      tag: "1.57"
+    extraEnv:
+      - name: SPAN_STORAGE_TYPE
+        value: s3
+      - name: COLLECTOR_OTLP_ENABLED
+        value: "true"
+      - name: COLLECTOR_OTLP_HTTP_HOST_PORT
+        value: ":4318"
+    nodeSelector: *obsNodeSelector
+    tolerations: *obsTolerations
+    persistence:
+      enabled: false
+
+  query:
+    enabled: true
+    service:
+      type: ClusterIP
+
+# =========================================================================== #
+#  OpenTelemetry Collector                                                    #
+#  ----------------------------------------------------------------           #
+#  Deployed as:                                                                #
+#   - DaemonSet (agent)  : receives OTLP from app pods on same node           #
+#   - Deployment (gateway): receives OTLP from agents, fans out to Jaeger    #
+# =========================================================================== #
+otelCollector:
+  enabled: true
+
+  mode: deployment   # gateway mode
+  name: otel-gateway
+
+  serviceAccount:
+    create: true
+    name: otel-collector
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+
+  nodeSelector: *obsNodeSelector
+  tolerations: *obsTolerations
+
+  # The full pipeline is defined in templates/_otel-collector-pipeline.tpl
+  # to keep this file readable. Helm passes these env vars through.
+  configMap:
+    create: false    # we render the full config in the template
+
+  # Used by the template
+  clusterName: obs-stack-cluster
+
+  # Endpoints the gateway fans out to
+  endpoints:
+    jaegerOtlpHttp: http://observability-stack-jaeger-collector.observability:4318
+    prometheusRemoteWrite: http://observability-stack-kube-prometheus-prometheus.observability:9090/api/v1/write
+    lokiHttp: http://observability-stack-loki.observability:3100/loki/api/v1/push

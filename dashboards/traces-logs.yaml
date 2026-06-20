@@ -1,0 +1,70 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-traces-logs
+  namespace: observability
+  labels:
+    grafana_dashboard: "1"
+    app.kubernetes.io/part-of: observability-stack
+data:
+  traces-logs.json: |
+    {
+      "annotations": { "list": [] },
+      "title": "Traces & Logs",
+      "uid": "traces-logs",
+      "version": 1,
+      "schemaVersion": 39,
+      "tags": ["jaeger", "loki", "observability"],
+      "time": { "from": "now-1h", "to": "now" },
+      "refresh": "30s",
+      "panels": [
+        {
+          "type": "stat",
+          "title": "Spans ingested (rate)",
+          "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "sum(rate(otelcol_receiver_accepted_spans[5m]))", "legendFormat": "accepted" },
+            { "expr": "sum(rate(otelcol_receiver_refused_spans[5m]))", "legendFormat": "refused" }
+          ]
+        },
+        {
+          "type": "stat",
+          "title": "Metric points ingested (rate)",
+          "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "sum(rate(otelcol_receiver_accepted_metric_points[5m]))", "legendFormat": "accepted" },
+            { "expr": "sum(rate(otelcol_receiver_refused_metric_points[5m]))", "legendFormat": "refused" }
+          ]
+        },
+        {
+          "type": "stat",
+          "title": "Log records ingested (rate)",
+          "gridPos": { "h": 4, "w": 8, "x": 16, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "sum(rate(otelcol_receiver_accepted_log_records[5m]))", "legendFormat": "accepted" },
+            { "expr": "sum(rate(otelcol_receiver_refused_log_records[5m]))", "legendFormat": "refused" }
+          ]
+        },
+        {
+          "type": "traces",
+          "title": "Search traces (Jaeger)",
+          "gridPos": { "h": 12, "w": 24, "x": 0, "y": 4 },
+          "datasource": { "type": "jaeger", "uid": "jaeger" },
+          "targets": [
+            { "query": "service=frontend&operation=GET%20%2Fapi%2Fcheckout&limit=20" }
+          ]
+        },
+        {
+          "type": "logs",
+          "title": "Recent logs (Loki)",
+          "gridPos": { "h": 12, "w": 24, "x": 0, "y": 16 },
+          "datasource": { "type": "loki", "uid": "loki" },
+          "targets": [
+            { "expr": "{namespace=\"demo-apps\"}", "refId": "A" }
+          ]
+        }
+      ]
+    }

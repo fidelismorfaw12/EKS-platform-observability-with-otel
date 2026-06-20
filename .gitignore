@@ -1,0 +1,37 @@
+# Local tfstate
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/tfplan
+terraform/terraform.tfvars
+*.tfstate
+*.tfstate.backup
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Helm
+helm/Chart.lock
+helm/charts/*.tgz
+helm/values.rendered.yaml
+
+# K8s
+kubeconfig
+~/.kube/config
+
+# Logs
+*.log
+
+# Build
+__pycache__/
+*.pyc
+.venv/
+venv/
+node_modules/
+dist/
+build/

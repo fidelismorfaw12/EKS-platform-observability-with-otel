@@ -1,0 +1,185 @@
+{{- if .Values.otelCollector.enabled -}}
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: {{ .Values.otelCollector.name | default "otel-gateway" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/part-of: observability-stack
+spec:
+  mode: {{ .Values.otelCollector.mode | default "deployment" }}
+  serviceAccount: {{ .Values.otelCollector.serviceAccount.name | default "otel-collector" }}
+
+  # ----------------------------------------------------------------------- #
+  #  Receivers — what comes INTO the collector                               #
+  # ----------------------------------------------------------------------- #
+  config:
+    receivers:
+      # OTLP from app pods (HTTP + gRPC)
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+      # Hostmetrics from the node (CPU, memory, disk, network)
+      hostmetrics:
+        collection_interval: 30s
+        scrapers:
+          cpu: {}
+          memory: {}
+          disk: {}
+          network: {}
+          filesystem: {}
+          load: {}
+          paging: {}
+          processes: {}
+
+      # K8s cluster-level metrics (deployments, pods, nodes count)
+      k8s_cluster:
+        collection_interval: 30s
+        auth_type: serviceAccount
+
+      # K8s node, pod, container metrics from kubelet
+      k8s_node:
+        collection_interval: 30s
+      k8s_pod:
+        collection_interval: 30s
+
+    processors:
+      # Add k8s metadata to every span/metric/log
+      k8sattributes:
+        auth_type: serviceAccount
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.pod.name
+            - k8s.deployment.name
+            - k8s.node.name
+            - k8s.service.name
+            - container.name
+            - k8s.label.app
+            - k8s.label.team
+          labels:
+            - tag_name: namespace
+              key: k8s.namespace.name
+              from: pod
+            - tag_name: pod
+              key: k8s.pod.name
+              from: pod
+            - tag_name: deployment
+              key: k8s.deployment.name
+              from: pod
+
+      # Add cluster name so multi-cluster queries work
+      attributes/cluster:
+        actions:
+          - key: cluster
+            value: {{ .Values.otelCollector.clusterName | default .Values.global.clusterName | quote }}
+            action: upsert
+
+      # Resource detection (cloud provider, region, instance id)
+      resourcedetection:
+        detectors: [env, ec2]
+        timeout: 2s
+        override: false
+
+      # Batching to reduce backend load
+      batch:
+        timeout: 5s
+        send_batch_size: 1024
+        send_batch_max_size: 2048
+
+      # Drop high-cardinality noise
+      filter/drop_noise:
+        error_mode: ignore
+        traces:
+          span:
+            - 'attributes["http.flavor"] == "1.0"'
+        metrics:
+          metric:
+            - 'name == "process.cpu.time"'
+        logs:
+          log_record:
+            - 'severity_text == "DEBUG"'
+
+      # Memory limiter — protect against OOM during backpressure
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 80
+        spike_limit_percentage: 25
+
+    # --------------------------------------------------------------------- #
+    #  Exporters — where the data goes OUT                                   #
+    # --------------------------------------------------------------------- #
+    exporters:
+      # Traces -> Jaeger via OTLP HTTP
+      otlp/jaeger:
+        endpoint: {{ .Values.otelCollector.endpoints.jaegerOtlpHttp | quote }}
+        tls:
+          insecure: true
+
+      # Metrics -> Prometheus remote-write receiver
+      prometheusremotewrite:
+        endpoint: {{ .Values.otelCollector.endpoints.prometheusRemoteWrite | quote }}
+        resource_to_telemetry_conversion:
+          enabled: true
+
+      # Logs -> Loki HTTP push API
+      loki:
+        endpoint: {{ .Values.otelCollector.endpoints.lokiHttp | quote }}
+        default_labels_enabled:
+          exporter: false
+          job: true
+
+      # Local debug
+      debug:
+        verbosity: basic
+
+    # --------------------------------------------------------------------- #
+    #  Service pipelines                                                     #
+    # --------------------------------------------------------------------- #
+    service:
+      telemetry:
+        logs:
+          level: info
+        metrics:
+          address: 0.0.0.0:8888
+
+      pipelines:
+        traces:
+          receivers:  [otlp]
+          processors: [memory_limiter, k8sattributes, resourcedetection, attributes/cluster, batch]
+          exporters:  [otlp/jaeger]
+
+        metrics:
+          receivers:  [otlp, hostmetrics, k8s_cluster, k8s_node, k8s_pod]
+          processors: [memory_limiter, k8sattributes, resourcedetection, attributes/cluster, filter/drop_noise, batch]
+          exporters:  [prometheusremotewrite]
+
+        logs:
+          receivers:  [otlp]
+          processors: [memory_limiter, k8sattributes, resourcedetection, attributes/cluster, filter/drop_noise, batch]
+          exporters:  [loki]
+
+  # ----------------------------------------------------------------------- #
+  #  Scheduling                                                              #
+  # ----------------------------------------------------------------------- #
+  nodeSelector:
+    workload: observability
+  tolerations:
+    - key: observability
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+{{- end }}

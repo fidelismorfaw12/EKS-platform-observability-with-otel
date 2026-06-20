@@ -1,0 +1,44 @@
+apiVersion: v2
+name: observability-stack
+description: |
+  Umbrella chart that installs the full observability stack on EKS:
+  kube-prometheus-stack (Prometheus + Alertmanager + Grafana + node-exporter + kube-state-metrics),
+  Loki + Promtail, Jaeger, OpenTelemetry Collector.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+maintainers:
+  - name: observability-team
+keywords:
+  - observability
+  - prometheus
+  - loki
+  - jaeger
+  - opentelemetry
+  - grafana
+  - eks
+dependencies:
+  - name: kube-prometheus-stack
+    repository: https://prometheus-community.github.io/helm-charts
+    version: "61.2.0"
+    condition: kubePrometheusStack.enabled
+    alias: kubePrometheusStack
+    import-values:
+      - child: grafana
+        parent: kubePrometheusStack.grafana
+  - name: loki
+    repository: https://grafana.github.io/helm-charts
+    version: "6.7.4"
+    condition: loki.enabled
+  - name: promtail
+    repository: https://grafana.github.io/helm-charts
+    version: "6.16.0"
+    condition: promtail.enabled
+  - name: jaeger
+    repository: https://jaegertracing.github.io/helm-charts
+    version: "3.1.2"
+    condition: jaeger.enabled
+  - name: opentelemetry-collector
+    repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+    version: "0.95.0"
+    condition: otelCollector.enabled

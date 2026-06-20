@@ -1,0 +1,114 @@
+# K8s manifests for the checkout service.
+# These are also referenced by terraform via `kubectl_manifest` (see terraform/main.tf).
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout
+  namespace: demo-apps
+  labels:
+    app: checkout
+    tier: web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: checkout
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: checkout
+        tier: web
+      annotations:
+        # Promtail picks these up
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: default
+      nodeSelector:
+        workload: general
+      containers:
+        - name: checkout
+          image: ${FRONTEND_IMAGE:-obs-demo/checkout:latest}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-gateway-collector.observability:4318
+            - name: OTEL_SERVICE_NAME
+              value: checkout
+            - name: SERVICE_NAMESPACE
+              value: demo
+            - name: DEPLOY_ENV
+              value: dev
+            - name: BACKEND_URL
+              value: http://backend:8000
+            - name: CART_URL
+              value: http://cart:8000
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkout
+  namespace: demo-apps
+  labels:
+    app: checkout
+spec:
+  type: ClusterIP
+  selector:
+    app: checkout
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: checkout
+  namespace: demo-apps
+  labels:
+    app: checkout
+    release: observability-stack
+spec:
+  selector:
+    matchLabels:
+      app: checkout
+  namespaceSelector:
+    matchNames:
+      - demo-apps
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s

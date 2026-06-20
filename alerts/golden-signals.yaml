@@ -1,0 +1,81 @@
+# Standalone copy of the alert rules.
+# Applied via terraform `kubectl_manifest` (see terraform/main.tf), so you don't
+# strictly need to `kubectl apply -f` this file by hand — but keeping it here
+# makes the repo self-contained for users who skip terraform.
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: golden-signals
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: observability-stack
+spec:
+  groups:
+    - name: golden-signals
+      rules:
+        - alert: HighLatencyP99
+          expr: |
+            histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (job, le)) > 0.8
+            and
+            sum(rate(http_requests_total[5m])) by (job) > 1
+          for: 10m
+          labels:
+            severity: warning
+            signal: latency
+          annotations:
+            summary: "p99 latency above 800ms for {{ $labels.job }}"
+
+        - alert: HighErrorRate
+          expr: |
+            sum(rate(http_requests_total{status=~"5.."}[5m])) by (job)
+            / clamp_min(sum(rate(http_requests_total[5m])) by (job), 1) > 0.01
+            and
+            sum(rate(http_requests_total[5m])) by (job) > 1
+          for: 5m
+          labels:
+            severity: critical
+            signal: errors
+          annotations:
+            summary: "Error rate > 1% for {{ $labels.job }}"
+
+        - alert: TrafficDrop
+          expr: |
+            sum by (job) (rate(http_requests_total[5m]))
+              < 0.1 * sum by (job) (rate(http_requests_total[5m] offset 1h))
+          for: 10m
+          labels:
+            severity: critical
+            signal: traffic
+          annotations:
+            summary: "Traffic to {{ $labels.job }} dropped by 90%"
+
+        - alert: NodeCPUHigh
+          expr: |
+            1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) by (node) > 0.85
+          for: 15m
+          labels:
+            severity: warning
+            signal: saturation
+          annotations:
+            summary: "Node {{ $labels.node }} CPU > 85%"
+
+        - alert: NodeMemoryHigh
+          expr: |
+            1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.90
+          for: 10m
+          labels:
+            severity: warning
+            signal: saturation
+          annotations:
+            summary: "Node memory > 90%"
+
+        - alert: PodCrashLooping
+          expr: increase(kube_pod_container_status_restarts_total[1h]) > 5
+          for: 5m
+          labels:
+            severity: critical
+            signal: errors
+          annotations:
+            summary: "{{ $labels.pod }} is crash-looping"

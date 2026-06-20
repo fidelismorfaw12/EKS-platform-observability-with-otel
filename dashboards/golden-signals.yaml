@@ -1,0 +1,133 @@
+# Grafana dashboard ConfigMaps.
+# Each file here becomes a kubernetes ConfigMap that terraform `kubectl_manifest`
+# applies. They land in the `observability` namespace and Grafana auto-loads
+# them because the kube-prometheus-stack sidecar watches for the
+# `grafana_dashboard` label.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-golden-signals
+  namespace: observability
+  labels:
+    grafana_dashboard: "1"
+    app.kubernetes.io/part-of: observability-stack
+data:
+  golden-signals.json: |
+    {
+      "annotations": { "list": [] },
+      "title": "Four Golden Signals",
+      "uid": "golden-signals",
+      "version": 1,
+      "schemaVersion": 39,
+      "tags": ["observability", "golden-signals"],
+      "time": { "from": "now-1h", "to": "now" },
+      "refresh": "30s",
+      "panels": [
+        {
+          "type": "stat",
+          "title": "Latency p99 (s)",
+          "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "max(job:http_request_duration_seconds:p99)", "legendFormat": "p99" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 0.5 },
+                  { "color": "red", "value": 0.8 }
+                ]
+              },
+              "unit": "s"
+            }
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Traffic (req/s)",
+          "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "sum(job:http_requests:rate5m)", "legendFormat": "req/s" }
+          ],
+          "fieldConfig": { "defaults": { "unit": "reqps" } }
+        },
+        {
+          "type": "stat",
+          "title": "Error Rate %",
+          "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "100 * max(job:http_error_ratio:ratio5m)", "legendFormat": "5xx %" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 0.5 },
+                  { "color": "red", "value": 1 }
+                ]
+              },
+              "unit": "percent"
+            }
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Node CPU avg %",
+          "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "100 * avg(node:cpu_utilization:ratio)", "legendFormat": "cpu %" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 70 },
+                  { "color": "red", "value": 85 }
+                ]
+              },
+              "unit": "percent"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Latency by service (p50, p95, p99)",
+          "gridPos": { "h": 10, "w": 24, "x": 0, "y": 6 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "job:http_request_duration_seconds:p99", "legendFormat": "{{job}} p99" },
+            { "expr": "job:http_request_duration_seconds:p95", "legendFormat": "{{job}} p95" },
+            { "expr": "job:http_request_duration_seconds:p50", "legendFormat": "{{job}} p50" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Traffic per service",
+          "gridPos": { "h": 10, "w": 12, "x": 0, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "job:http_requests:rate5m", "legendFormat": "{{job}}" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Error rate per service",
+          "gridPos": { "h": 10, "w": 12, "x": 12, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "100 * job:http_error_ratio:ratio5m", "legendFormat": "{{job}} 5xx %" }
+          ]
+        }
+      ]
+    }

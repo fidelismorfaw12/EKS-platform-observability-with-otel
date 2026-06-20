@@ -1,0 +1,43 @@
+# Example terraform.tfvars
+# Copy to terraform.tfvars and edit per environment.
+
+region         = "us-east-1"
+environment    = "dev"
+project_name   = "obs-stack"
+cluster_name   = "obs-stack-dev"
+cluster_version = "1.30"
+vpc_cidr       = "10.0.0.0/16"
+
+system_node_group = {
+  instance_types = ["t3.large"]
+  desired_size   = 2
+  min_size       = 2
+  max_size       = 4
+  disk_size      = 100
+}
+
+workload_node_group = {
+  instance_types = ["t3.medium"]
+  desired_size   = 3
+  min_size       = 3
+  max_size       = 6
+  disk_size      = 50
+}
+
+observability_node_group = {
+  instance_types = ["r6i.xlarge"]
+  desired_size   = 2
+  min_size       = 1
+  max_size       = 4
+  disk_size      = 200
+}
+
+kube_prometheus_stack_version = "61.2.0"
+loki_chart_version            = "6.7.4"
+promtail_chart_version        = "6.16.0"
+jaeger_chart_version          = "3.1.2"
+otel_collector_chart_version  = "0.95.0"
+
+grafana_admin_password = "change-me-in-prod"
+
+enable_karpenter = true

@@ -1,0 +1,324 @@
+{{- if .Values.kubePrometheusStack.enabled -}}
+# =========================================================================== #
+#  Recording rules — pre-compute the heavy queries so dashboards are fast.    #
+# =========================================================================== #
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}-recording-rules
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: observability-stack
+    prometheus: {{ .Release.Name }}-kube-prometheus-prometheus
+spec:
+  groups:
+    - name: golden-signals-recording
+      interval: 1m
+      rules:
+        # ---- Latency ---- #
+        - record: job:http_request_duration_seconds:p99
+          expr: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (job, le))
+
+        - record: job:http_request_duration_seconds:p95
+          expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (job, le))
+
+        - record: job:http_request_duration_seconds:p50
+          expr: histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[5m])) by (job, le))
+
+        - record: job:http_request_duration_seconds:avg
+          expr: sum(rate(http_request_duration_seconds_sum[5m])) by (job) / sum(rate(http_request_duration_seconds_count[5m])) by (job)
+
+        # ---- Traffic ---- #
+        - record: job:http_requests:rate5m
+          expr: sum(rate(http_requests_total[5m])) by (job)
+
+        # ---- Errors ---- #
+        - record: job:http_5xx:rate5m
+          expr: sum(rate(http_requests_total{status=~"5.."}[5m])) by (job)
+
+        - record: job:http_4xx:rate5m
+          expr: sum(rate(http_requests_total{status=~"4.."}[5m])) by (job)
+
+        - record: job:http_error_ratio:ratio5m
+          expr: |
+            sum(rate(http_requests_total{status=~"5.."}[5m])) by (job)
+            /
+            clamp_min(sum(rate(http_requests_total[5m])) by (job), 1)
+
+        # ---- Saturation ---- #
+        - record: node:cpu_utilization:ratio
+          expr: |
+            1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) by (node)
+
+        - record: node:memory_utilization:ratio
+          expr: |
+            1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)
+
+        - record: node:disk_utilization:ratio
+          expr: |
+            1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} /
+                 node_filesystem_size_bytes{fstype!~"tmpfs|overlay"})
+
+        - record: pod:cpu_utilization:ratio
+          expr: |
+            sum(rate(container_cpu_usage_seconds_total{container!=""}[5m])) by (namespace, pod)
+            /
+            on (namespace, pod) group_left
+            kube_pod_container_resource_limits{resource="cpu"}
+
+        - record: pod:memory_utilization:ratio
+          expr: |
+            sum(container_memory_working_set_bytes{container!=""}) by (namespace, pod)
+            /
+            on (namespace, pod) group_left
+            kube_pod_container_resource_limits{resource="memory"}
+---
+# =========================================================================== #
+#  Alerting rules — the four golden signals + infra basics                    #
+# =========================================================================== #
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}-alerting-rules
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: observability-stack
+    prometheus: {{ .Release.Name }}-kube-prometheus-prometheus
+spec:
+  groups:
+    # ---------------------------------------------------------------- #
+    #  Latency                                                          #
+    # ---------------------------------------------------------------- #
+    - name: golden-signal-latency
+      rules:
+        - alert: HighLatencyP99
+          expr: |
+            job:http_request_duration_seconds:p99 > 0.8
+            and
+            job:http_requests:rate5m > 1
+          for: 10m
+          labels:
+            severity: warning
+            signal: latency
+          annotations:
+            summary: "p99 latency above 800ms for {{ $labels.job }}"
+            description: |
+              The 99th percentile latency for {{ $labels.job }} has been
+              above 800ms for 10 minutes while serving more than 1 req/s.
+              This means 1% of users are experiencing slow responses.
+
+        - alert: LatencyP99Spike
+          expr: |
+            job:http_request_duration_seconds:p99
+              > 3 * job:http_request_duration_seconds:p99 offset 30m
+          for: 5m
+          labels:
+            severity: critical
+            signal: latency
+          annotations:
+            summary: "p99 latency tripled for {{ $labels.job }}"
+            description: "p99 latency is now 3x what it was 30 minutes ago."
+
+    # ---------------------------------------------------------------- #
+    #  Traffic                                                          #
+    # ---------------------------------------------------------------- #
+    - name: golden-signal-traffic
+      rules:
+        - alert: TrafficDrop
+          expr: |
+            sum by (job) (rate(http_requests_total[5m]))
+              < 0.1 * sum by (job) (rate(http_requests_total[5m] offset 1h))
+          for: 10m
+          labels:
+            severity: critical
+            signal: traffic
+          annotations:
+            summary: "Traffic to {{ $labels.job }} dropped by 90%"
+            description: |
+              Traffic to {{ $labels.job }} is less than 10% of what it was
+              an hour ago. A drop usually means something upstream is broken.
+
+        - alert: TrafficSpike
+          expr: |
+            sum by (job) (rate(http_requests_total[5m]))
+              > 5 * sum by (job) (rate(http_requests_total[5m] offset 1h))
+          for: 10m
+          labels:
+            severity: warning
+            signal: traffic
+          annotations:
+            summary: "Traffic to {{ $labels.job }} spiked 5x"
+
+    # ---------------------------------------------------------------- #
+    #  Errors                                                           #
+    # ---------------------------------------------------------------- #
+    - name: golden-signal-errors
+      rules:
+        - alert: HighErrorRate
+          expr: |
+            job:http_error_ratio:ratio5m > 0.01
+            and
+            job:http_requests:rate5m > 1
+          for: 5m
+          labels:
+            severity: critical
+            signal: errors
+          annotations:
+            summary: "Error rate > 1% for {{ $labels.job }}"
+            description: |
+              {{ $labels.job }} is returning 5xx for more than 1% of
+              requests while serving more than 1 req/s. The query:
+              rate(http_requests_total{status=~"5.."}[5m])
+              / rate(http_requests_total[5m]) > 0.01
+
+        - alert: PodCrashLooping
+          expr: |
+            increase(kube_pod_container_status_restarts_total[1h]) > 5
+          for: 5m
+          labels:
+            severity: critical
+            signal: errors
+          annotations:
+            summary: "{{ $labels.pod }} in {{ $labels.namespace }} is crash-looping"
+            description: "Container restarted more than 5 times in the last hour."
+
+    # ---------------------------------------------------------------- #
+    #  Saturation                                                       #
+    # ---------------------------------------------------------------- #
+    - name: golden-signal-saturation
+      rules:
+        - alert: NodeCPUHigh
+          expr: node:cpu_utilization:ratio > 0.85
+          for: 15m
+          labels:
+            severity: warning
+            signal: saturation
+          annotations:
+            summary: "Node {{ $labels.node }} CPU > 85%"
+
+        - alert: NodeMemoryHigh
+          expr: node:memory_utilization:ratio > 0.90
+          for: 10m
+          labels:
+            severity: warning
+            signal: saturation
+          annotations:
+            summary: "Node {{ $labels.node }} memory > 90%"
+
+        - alert: NodeDiskFull
+          expr: node:disk_utilization:ratio > 0.85
+          for: 10m
+          labels:
+            severity: warning
+            signal: saturation
+          annotations:
+            summary: "Node {{ $labels.node }} disk > 85%"
+
+        - alert: PodCPUThrottled
+          expr: |
+            rate(container_cpu_cfs_throttled_seconds_total[5m])
+              > 0.5 * rate(container_cpu_cfs_periods_total[5m])
+          for: 10m
+          labels:
+            severity: warning
+            signal: saturation
+          annotations:
+            summary: "{{ $labels.pod }} is being CPU-throttled > 50%"
+
+        - alert: PodMemoryNearLimit
+          expr: |
+            sum(container_memory_working_set_bytes{container!=""}) by (namespace, pod)
+              /
+            on (namespace, pod) group_left
+            kube_pod_container_resource_limits{resource="memory"} > 0.90
+          for: 10m
+          labels:
+            severity: critical
+            signal: saturation
+          annotations:
+            summary: "{{ $labels.pod }} is using > 90% of memory limit"
+
+    # ---------------------------------------------------------------- #
+    #  Cluster health                                                   #
+    # ---------------------------------------------------------------- #
+    - name: kubernetes-cluster
+      rules:
+        - alert: KubernetesNodeNotReady
+          expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Node {{ $labels.node }} is NotReady"
+
+        - alert: KubernetesNodeUnreachable
+          expr: kube_node_spec_taint{effect="NoSchedule",key="node.kubernetes.io/unreachable"} == 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Node {{ $labels.node }} is unreachable"
+
+        - alert: KubernetesDeploymentReplicasMismatch
+          expr: |
+            kube_deployment_spec_replicas != kube_deployment_status_available_replicas
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Deployment {{ $labels.deployment }} has unavailable replicas"
+
+        - alert: KubernetesPodNotScheduled
+          expr: |
+            kube_pod_status_unschedulable == 1
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod {{ $labels.pod }} in {{ $labels.namespace }} unschedulable for 30m"
+
+    # ---------------------------------------------------------------- #
+    #  Observability stack itself                                       #
+    # ---------------------------------------------------------------- #
+    - name: observability-self
+      rules:
+        - alert: PrometheusDown
+          expr: up{job="prometheus"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Prometheus is down"
+
+        - alert: LokiDown
+          expr: up{job="loki"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Loki is down"
+
+        - alert: JaegerDown
+          expr: up{job="jaeger"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Jaeger is down"
+
+        - alert: PrometheusTargetMissing
+          expr: 100 * (count(up == 0) by (namespace, job) / count(up) by (namespace, job)) > 20
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "More than 20% of targets for {{ $labels.job }} are down"
+
+        - alert: PrometheusTooManyIngestedSamples
+          expr: rate(prometheus_tsdb_head_samples_appended_total[5m]) > 100000
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Prometheus ingesting > 100k samples/sec — card blow-up?"
+{{- end }}

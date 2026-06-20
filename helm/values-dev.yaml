@@ -1,0 +1,37 @@
+# =========================================================================== #
+#  Dev environment overrides                                                  #
+# --------------------------------------------------------------------------- #
+#  Goal: cheap, friendly for laptops, fast to iterate.                        #
+# =========================================================================== #
+
+global:
+  environment: dev
+
+# Smaller retention in dev
+kubePrometheusStack:
+  prometheus:
+    prometheusSpec:
+      retention: 7d
+      retentionSize: 10GB
+      replicas: 1
+
+  alertmanager:
+    config:
+      route:
+        repeat_interval: 24h   # don't spam in dev
+
+loki:
+  singleBinary:
+    persistence:
+      size: 20Gi
+  loki:
+    limits_config:
+      retention_period: 168h    # 7d
+
+jaeger:
+  allInOne:
+    image:
+      tag: "1.57"
+  storage:
+    s3:
+      bucket: ""                # still injected by terraform
