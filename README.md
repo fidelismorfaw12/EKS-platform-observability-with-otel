@@ -503,16 +503,5 @@ aws dynamodb delete-table --table-name obs-stack-tfstate-locks
 
 ---
 
-## License
 
-MIT. See `LICENSE` (or add your own).
 
----
-
-## Acknowledgements
-
-Inspired by the LinkedIn post on the three pillars + four golden signals
-framework that originally motivated this repo. The stack is the open-source
-answer to "what would a real SRE team actually install?" — Prometheus, Loki,
-Jaeger, Grafana, OpenTelemetry — wired together with Terraform and Helm so
-you can go from zero to "I can see my p99" in 15 minutes.
